@@ -143,7 +143,7 @@ class DiffusionAnalyzer(MSONable):
         avg_nsteps=1000,
         lattices=None,
         c_ranges=None,
-        c_range_include_edge=False,
+        c_range_include_diffuse_over_edge=False,
         structures=None,
     ):
         """
@@ -201,13 +201,14 @@ class DiffusionAnalyzer(MSONable):
                 set to the lattice in the "structure" argument.
             c_ranges (list): A list of fractional ranges of z-axis to define
                 regions and calculate regional MSD and regional diffusivity.
-                If the start and end positions of a diffusing specie between
-                two time steps are all within the c_ranges, that displacement
-                is collected to calculate MSD in that time step. units: Å.
+                 units: Å.
                 Default to None.
-            c_range_include_edge (bool): Whether to include displacements start or end
-                on the edge of the defined c_ranges into the calculation of regional
-                MSD. Default to False.
+            c_range_include_diffuse_over_edge (bool): Whether to include displacements
+                start or end out of the given c_range. If False, one displacement is
+                collected to calculate MSD only if its start and end positions are all
+                within c_ranges. If True, one displacement is collected to calculate MSD
+                as if one of its start and end positions is within c_ranges. Default to
+                False.
             structures (list): A list of trajectory structures only used in the
                 calculation of regional MSD and regional diffusivity. These structures
                 should be the same as those used to construct the diffusion analyzer.
@@ -277,9 +278,16 @@ class DiffusionAnalyzer(MSONable):
             # calculate mean square charge displacement
             mscd = np.zeros_like(msd, dtype=np.double)
 
-            # calculate regional msd and number of diffusing specie in those regions
-            msd_c_range = np.zeros_like(dt, dtype=np.double)
-            msd_c_range_components = np.zeros((*dt.shape, 3))
+            if c_ranges:
+                if not structures:
+                    raise ValueError(
+                        "structures must be provided for regional diffusion analysis with c_ranges."
+                    )
+                # calculate regional msd and number of diffusing specie in those regions
+                msd_c_range = np.zeros_like(dt, dtype=np.double)
+                msd_c_range_components = np.zeros((*dt.shape, 3))
+                # record # of diffusing species inside c_range at each timestep
+                n_species_c_range = []
 
             for i, n in enumerate(timesteps):
                 if not smoothed:
@@ -301,11 +309,11 @@ class DiffusionAnalyzer(MSONable):
                 # Get regional msd
                 if c_ranges:
                     indices_c_range = []
-                    if not c_range_include_edge:
+                    if not c_range_include_diffuse_over_edge:
                         for index in indices:
                             if any(
-                                lower < structures[i][index].c < upper
-                                and lower < structures[i + 1][index].c < upper
+                                lower <= structures[i][index].c <= upper
+                                and lower <= structures[i + 1][index].c <= upper
                                 for (lower, upper) in c_ranges
                             ):
                                 indices_c_range.append(index)
@@ -321,6 +329,7 @@ class DiffusionAnalyzer(MSONable):
                     msd_c_range_components[i] = np.average(
                         dcomponents[indices_c_range] ** 2, axis=(0, 1)
                     )
+                    n_species_c_range.append(len(indices_c_range))
 
                 # Get mscd
                 sq_chg_disp = np.sum(dx[indices, :, :], axis=0) ** 2
@@ -381,7 +390,7 @@ class DiffusionAnalyzer(MSONable):
                     diffusivity_c_range_components_std_dev
                 )
 
-                n_specie_c_range = np.average([len(i) for i in indices_c_range])
+                n_specie_c_range = np.average(n_species_c_range)
                 vol_c_range = np.sum(
                     [
                         max(min(upper, 1), 0) - max(min(lower, 1), 0)
@@ -669,7 +678,8 @@ class DiffusionAnalyzer(MSONable):
                 initial structure from which the current set of displacements
                 are computed.
             **kwargs: kwargs supported by the :class:`DiffusionAnalyzer`_.
-                Examples include smoothed, min_obs, avg_nsteps.
+                Examples include smoothed, min_obs, avg_nsteps, c_ranges,
+                c_range_include_diffuse_over_edge.
         """
         p, lattices = [], []
         for i, s in enumerate(structures):
@@ -701,6 +711,24 @@ class DiffusionAnalyzer(MSONable):
         )
         if initial_disp is not None:
             disp += initial_disp[:, None, :]
+
+        if "c_ranges" in kwargs:
+            if initial_structure is not None:
+                structures = [initial_structure] + structures
+            else:
+                structures = [structure] + structures
+
+            return cls(
+                structure,
+                disp,
+                specie,
+                temperature,
+                time_step,
+                step_skip=step_skip,
+                lattices=lattices,
+                structures=structures,
+                **kwargs,
+            )
 
         return cls(
             structure,
